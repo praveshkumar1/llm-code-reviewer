@@ -3,12 +3,15 @@ package reviewer
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"strings"
 
 	"code-reviewer/internal/git"
 	"code-reviewer/internal/llm"
 	"code-reviewer/internal/utils"
 )
 
+// Run starts the code review process for a given git repository
 func Run(repoPath string) error {
 	if !git.IsGitRepo(repoPath) {
 		return fmt.Errorf("not a git repository: %s", repoPath)
@@ -24,19 +27,30 @@ func Run(repoPath string) error {
 		return nil
 	}
 
-	// chunk diff
-	chunks := utils.ChunkDiff(diff, 3000)
-	fmt.Printf("Diff split into %d chunks\n\n", len(chunks))
+	fmt.Println(">>> Reviewer started")
 
-	var allResults []ReviewResult
+	// 🔥 FILE-AWARE CHUNKING
+	// Split diff by files, then further split each file if large
+	fileChunks := utils.SplitDiffByFile(diff, 3000)
+	fmt.Printf("Diff split into %d files\n\n", len(fileChunks))
 
-	for i, chunk := range chunks {
-		fmt.Printf("🧩 Processing chunk %d\n", i+1)
+	// Map[file] → list of all issues from all chunks of that file
+	fileIssues := make(map[string][]Issue)
 
-		// build prompt for LLM
-		prompt := fmt.Sprintf(`You are a code reviewer. Review the following diff and return JSON in this format:
+	for file, chunks := range fileChunks {
+		fmt.Printf("📄 Reviewing file: %s (%d chunks)\n", file, len(chunks))
+
+		// Combine all chunks for this file into a single string
+		combinedDiff := strings.Join(chunks, "\n")
+
+		prompt := fmt.Sprintf(`
+You are a strict code reviewer.
+
+Review the following git diff.
+Return ONLY valid JSON in this format:
+
 {
-  "file": "<filename>",
+  "file": "%s",
   "issues": [
     {
       "type": "bug|security|performance|style|best_practice",
@@ -49,8 +63,9 @@ func Run(repoPath string) error {
   ]
 }
 
-Here is the diff:
-%s`, chunk)
+Diff:
+%s
+`, file, combinedDiff)
 
 		output, err := llm.SendToLLM("qwen2.5-coder:14b", prompt)
 		if err != nil {
@@ -58,22 +73,39 @@ Here is the diff:
 			continue
 		}
 
-		// parse LLM JSON output
+		fmt.Println("LLM raw output:", output)
+
 		var result ReviewResult
 		if err := json.Unmarshal([]byte(output), &result); err != nil {
-			fmt.Println("❌ Failed to parse JSON from LLM:", err)
-			fmt.Println("Raw output:", output)
+			fmt.Println("❌ JSON parse error:", err)
+			fmt.Println("Raw:", output)
 			continue
 		}
 
-		allResults = append(allResults, result)
+		// 🔹 Aggregate all issues per file
+		fileIssues[result.File] = append(fileIssues[result.File], result.Issues...)
 	}
 
-	// Final JSON summary
-	finalJSON, _ := json.MarshalIndent(allResults, "", "  ")
-	fmt.Println("✅ Final Review JSON:")
-	fmt.Println(string(finalJSON))
+	// 🔥 FINAL CONSOLIDATION: merge issues for each file
+	var finalResults []ReviewResult
+	for file, issues := range fileIssues {
+		// Optional: run high-level LLM refinement per file
+		final, err := FinalLLMReview(file, issues)
+		if err != nil {
+			fmt.Println("❌ Final LLM review error for", file, ":", err)
+			// fallback: include raw issues if refinement fails
+			finalResults = append(finalResults, ReviewResult{
+				File:   file,
+				Issues: issues,
+			})
+			continue
+		}
+		finalResults = append(finalResults, final)
+	}
+
+	// 🔹 Print final consolidated JSON
+	fmt.Println("\n✅ FINAL CONSOLIDATED REVIEW")
+	json.NewEncoder(os.Stdout).Encode(finalResults)
 
 	return nil
 }
-

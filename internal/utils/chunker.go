@@ -1,25 +1,28 @@
 package utils
 
-const DefaultChunkSize = 3000 // characters (safe for 14B models)
+import "strings"
 
-func ChunkDiff(diff string, maxSize int) []string {
-	if maxSize <= 0 {
-		maxSize = DefaultChunkSize
-	}
-
+func ChunkDiff(diff string, maxLines int) []string {
+	lines := strings.Split(diff, "\n")
 	var chunks []string
-	var current string
 
-	parts := splitByFile(diff)
+	current := ""
+	count := 0
 
-	for _, part := range parts {
-		if len(current)+len(part) > maxSize {
-			if current != "" {
-				chunks = append(chunks, current)
-			}
-			current = part
-		} else {
-			current += part
+	for _, line := range lines {
+		if strings.HasPrefix(line, "diff --git") && current != "" {
+			chunks = append(chunks, current)
+			current = ""
+			count = 0
+		}
+
+		current += line + "\n"
+		count++
+
+		if count >= maxLines {
+			chunks = append(chunks, current)
+			current = ""
+			count = 0
 		}
 	}
 
@@ -30,50 +33,35 @@ func ChunkDiff(diff string, maxSize int) []string {
 	return chunks
 }
 
-func splitByFile(diff string) []string {
-	var files []string
-	current := ""
+func SplitDiffByFile(diff string, maxLines int) map[string][]string {
+	result := make(map[string][]string)
 
-	lines := splitLines(diff)
+	lines := strings.Split(diff, "\n")
+	var currentFile string
+	var buffer []string
+
+	flush := func() {
+		if currentFile != "" && len(buffer) > 0 {
+			result[currentFile] = append(
+				result[currentFile],
+				strings.Join(buffer, "\n"),
+			)
+		}
+		buffer = nil
+	}
 
 	for _, line := range lines {
-		if startsWith(line, "diff --git") && current != "" {
-			files = append(files, current)
-			current = ""
+		if strings.HasPrefix(line, "diff --git") {
+			flush()
+			parts := strings.Split(line, " ")
+			if len(parts) >= 3 {
+				currentFile = strings.TrimPrefix(parts[2], "a/")
+			}
 		}
-		current += line + "\n"
+		buffer = append(buffer, line)
 	}
 
-	if current != "" {
-		files = append(files, current)
-	}
-
-	return files
+	flush()
+	return result
 }
 
-/* helpers */
-
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-
-	for i := range s {
-		if s[i] == '\n' {
-			lines = append(lines, s[start:i])
-			start = i + 1
-		}
-	}
-
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-
-	return lines
-}
-
-func startsWith(s, prefix string) bool {
-	if len(s) < len(prefix) {
-		return false
-	}
-	return s[:len(prefix)] == prefix
-}

@@ -4,50 +4,75 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"strings"
+	"time"
 )
 
-const OllamaURL = "http://localhost:11434/api/chat"
+// OllamaGenerateURL is the local Ollama endpoint for model inference
+const OllamaGenerateURL = "http://localhost:11434/api/generate"
 
-// ReviewRequest defines what we send to Ollama
-type ReviewRequest struct {
-	Model  string `json:"model"`  // "qwen2.5-coder:14b"
-	Prompt string `json:"prompt"` // chunk content + instructions
+// Request sent to Ollama
+type GenerateRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	Stream bool   `json:"stream"`
 }
 
-// ReviewResponse defines what we expect from Ollama
-type ReviewResponse struct {
-	Output string `json:"output"` // raw LLM output
+// Top-level response from Ollama
+type GenerateResponse struct {
+	Model    string `json:"model"`
+	Response string `json:"response"`
+	Done     bool   `json:"done"`
 }
 
-// SendToLLM sends a single chunk to Ollama and returns raw response
-func SendToLLM(model string, chunk string) (string, error) {
-	reqBody := ReviewRequest{
+// SendToLLM sends a prompt to Ollama and returns the structured JSON response
+func SendToLLM(model, prompt string) (string, error) {
+	payload := GenerateRequest{
 		Model:  model,
-		Prompt: chunk,
+		Prompt: prompt,
+		Stream: false,
 	}
 
-	jsonData, err := json.Marshal(reqBody)
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
 	}
 
-	resp, err := http.Post(fmt.Sprintf("%s/run", OllamaURL), "application/json", bytes.NewBuffer(jsonData))
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+	}
+
+	req, err := http.NewRequest("POST", OllamaGenerateURL, bytes.NewBuffer(body))
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
+	var raw map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return "", err
 	}
 
-	var llmResp ReviewResponse
-	if err := json.Unmarshal(body, &llmResp); err != nil {
-		return "", fmt.Errorf("failed to parse LLM response: %w, raw: %s", err, string(body))
+	// ✅ Extract Ollama response text HERE
+	response, ok := raw["response"].(string)
+	if !ok {
+		return "", fmt.Errorf("ollama response missing 'response' field")
 	}
 
-	return llmResp.Output, nil
+	// Clean markdown
+	response = strings.TrimSpace(response)
+	response = strings.TrimPrefix(response, "```json")
+	response = strings.TrimPrefix(response, "```")
+	response = strings.TrimSuffix(response, "```")
+	response = strings.TrimSpace(response)
+
+	return response, nil
 }
